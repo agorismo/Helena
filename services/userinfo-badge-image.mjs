@@ -1,4 +1,4 @@
-import sharp from 'sharp';
+git commit -m "Initial commit - Helena Bot"import sharp from 'sharp';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
