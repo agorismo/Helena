@@ -1,7 +1,7 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-
+import { isOwner } from "../services/developer.mjs";
 import { getPlayer } from "../database/economy.mjs";
 import { getJob } from "../config/jobs.mjs";
 import { xpForLevel } from "../services/experience.mjs";
@@ -62,9 +62,7 @@ export default {
                 userId
             );
 
-            const owner = Boolean(
-                OWNER_ID && String(userId) === OWNER_ID
-            );
+            const owner = isOwner(userId);
 
             const username =
                 interaction.user?.displayName ||

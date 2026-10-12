@@ -10,7 +10,7 @@ import {
 // CONFIGURAÇÕES
 // ==========================================
 
-const PREFIX = "/";
+const PREFIX = "h";
 
 const CATEGORIES = {
     economia: {
@@ -112,7 +112,7 @@ function createMainHelp() {
 
             value:
                 category.description +
-                "\n`/ajuda categoria:" +
+                "\n`hajuda categoria:" +
                 id +
                 "`",
 
@@ -130,8 +130,8 @@ function createMainHelp() {
             "os comandos disponíveis em cada categoria.",
             "",
             "**Como utilizar:**",
-            "Use `/ajuda` para abrir este menu ou",
-            "`/ajuda categoria:economia` para ver os comandos",
+            "Use `hajuda` para abrir este menu ou",
+            "`hajuda categoria:economia` para ver os comandos",
             "de uma categoria específica."
         ].join("\n"),
 
@@ -140,7 +140,7 @@ function createMainHelp() {
         fields,
 
         footer:
-            "Helena Economy • Sua jornada começa aqui."
+            "Helena • Sua jornada começa aqui."
     });
 }
 
@@ -186,7 +186,7 @@ export default {
     name: "ajuda",
 
     description:
-        "Consulte os comandos e sistemas da Helena Economy.",
+        "Consulte os comandos e sistemas da Helena.",
 
     options: [
         {

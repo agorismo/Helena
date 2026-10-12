@@ -1,13 +1,27 @@
 
 import WebSocket from "ws";
 
-import { runMigrations } from "./database/migrations.mjs";
-import { runCombatMigrations } from "./database/combat-migrations.mjs";
+import {
+    runMigrations
+} from "./database/migrations.mjs";
+
+import {
+    runCombatMigrations
+} from "./database/combat-migrations.mjs";
 
 import {
     carregarComandos,
     registrarComandos
 } from "./registrar.mjs";
+
+import {
+    startStatusRotation,
+    stopStatusRotation
+} from "./services/status.mjs";
+
+import {
+    getStatusMessages
+} from "./services/status-data.mjs";
 
 import {
     runStreakMigrations
@@ -25,6 +39,10 @@ import {
 } from "./services/developer.mjs";
 
 import {
+    processarPrefixo
+} from "./services/prefix.mjs";
+
+import {
     runPlayerNamesMigrations,
     savePlayerName
 } from "./services/player-names.mjs";
@@ -38,6 +56,9 @@ import {
 // ==========================================
 
 const API = "https://api.vsync.lat";
+
+const GATEWAY =
+    API.replace(/^http/, "ws") + "/gateway";
 
 const TOKEN = process.env.VSYNC_BOT_TOKEN;
 
@@ -53,10 +74,13 @@ const headers = {
 };
 
 // ==========================================
-// UTILITÁRIOS
+// RESPONDER INTERAÇÃO SLASH
 // ==========================================
 
-async function responderInteracao(interaction, resultado) {
+async function responderInteracao(
+    interaction,
+    resultado
+) {
     const callback = await fetch(
         `${API}/interactions/${interaction.id}/${interaction.token}/callback`,
         {
@@ -98,7 +122,13 @@ function mensagemErro(
 // ENVIAR MENSAGEM NORMAL AO CANAL
 // ==========================================
 
-async function enviarMensagemCanal(interaction, data) {
+// Utilizado pelo /perfil e pelos comandos
+// executados através do prefixo h.
+
+async function enviarMensagemCanal(
+    interaction,
+    data
+) {
     const guildId = interaction.guildId;
     const channelId = interaction.channelId;
 
@@ -133,16 +163,24 @@ async function enviarMensagemCanal(interaction, data) {
 // EXECUÇÃO ESPECIAL DO /PERFIL
 // ==========================================
 
-async function executarPerfil(interaction, comando) {
-    // Confirma a interação ANTES de executar
-    // Sharp e iniciar o upload.
+// Confirma a interação antes da geração
+// da imagem com Sharp.
+//
+// Depois publica o cartão no canal.
 
+async function executarPerfil(
+    interaction,
+    comando
+) {
     const confirmado = await responderInteracao(
         interaction,
         {
             type: "message",
+
             data: {
-                body: "🎨 Gerando seu cartão de perfil...",
+                body:
+                    "🎨 Gerando seu cartão de perfil...",
+
                 ephemeral: true
             }
         }
@@ -157,7 +195,8 @@ async function executarPerfil(interaction, comando) {
     }
 
     try {
-        const resultado = await comando.execute(interaction);
+        const resultado =
+            await comando.execute(interaction);
 
         if (!resultado) {
             console.error(
@@ -167,30 +206,16 @@ async function executarPerfil(interaction, comando) {
             return;
         }
 
-        // O comando continua retornando:
-        //
-        // {
-        //   type: "message",
-        //   data: {
-        //     body: "",
-        //     attachments: ["att:ID"]
-        //   }
-        // }
-        //
-        // Porém, agora enviamos o resultado
-        // como mensagem normal ao canal,
-        // pois o callback inicial já foi usado.
-
-        if (resultado.type !== "message" || !resultado.data) {
+        if (
+            resultado.type !== "message" ||
+            !resultado.data
+        ) {
             throw new Error(
                 "Formato de resposta inválido no /perfil."
             );
         }
 
         const data = resultado.data;
-
-        // Evita publicar respostas de erro efêmeras
-        // como mensagens públicas no canal.
 
         if (data.ephemeral) {
             console.error(
@@ -205,11 +230,17 @@ async function executarPerfil(interaction, comando) {
             interaction,
             {
                 body: data.body ?? "",
+
                 ...(data.attachments
-                    ? { attachments: data.attachments }
+                    ? {
+                        attachments: data.attachments
+                    }
                     : {}),
+
                 ...(data.embeds
-                    ? { embeds: data.embeds }
+                    ? {
+                        embeds: data.embeds
+                    }
                     : {})
             }
         );
@@ -269,6 +300,14 @@ await registrarComandos(
     comandos
 );
 
+console.log(
+    `[COMANDOS] ${comandos.size} comandos carregados.`
+);
+
+console.log(
+    "[PREFIXO] Sistema de comandos h preparado."
+);
+
 // ==========================================
 // COMPONENTES INTERATIVOS
 // ==========================================
@@ -283,8 +322,11 @@ async function executarComponente(interaction) {
             "[USERINFO COMPONENT]",
             {
                 customId,
+
                 userId: interaction.user?.id,
-                values: interaction.data?.values || []
+
+                values:
+                    interaction.data?.values || []
             }
         );
 
@@ -311,293 +353,806 @@ async function executarComponente(interaction) {
 }
 
 // ==========================================
-// GATEWAY
+// ESTADO DO GATEWAY
 // ==========================================
 
-const ws = new WebSocket(
-    API.replace(/^http/, "ws") + "/gateway"
-);
+let ws = null;
 
 let heartbeat = null;
 
+let reconnectTimer = null;
+
+let reconnectAttempts = 0;
+
+let shuttingDown = false;
+
 // ==========================================
-// EVENTOS DO GATEWAY
+// ESTADO DOS SERVIDORES
 // ==========================================
 
-ws.on("message", async (raw) => {
-    try {
-        const msg = JSON.parse(
-            raw.toString()
-        );
+const guildIds = new Set();
 
-        // ==================================
-        // HELLO
-        // ==================================
+let guildCountComplete = false;
 
-        if (msg.op === "hello") {
-            ws.send(
-                JSON.stringify({
-                    op: "identify",
-                    token: TOKEN
-                })
-            );
+// ==========================================
+// IDENTIFICAR ID DO SERVIDOR
+// ==========================================
 
-            clearInterval(heartbeat);
+function obterGuildId(guild) {
+    if (
+        typeof guild === "string" ||
+        typeof guild === "number"
+    ) {
+        return String(guild);
+    }
 
-            heartbeat = setInterval(() => {
-                if (
-                    ws.readyState === WebSocket.OPEN
-                ) {
-                    ws.send(
-                        JSON.stringify({
-                            op: "ping"
-                        })
-                    );
-                }
-            }, msg.heartbeatMs);
-
-            return;
-        }
-
-        // ==================================
-        // READY
-        // ==================================
-
-        if (msg.op === "ready") {
-            console.log(
-                `Online como ${msg.user.displayName}`
-            );
-
-            console.log(
-                `Comandos carregados: ${comandos.size}`
-            );
-
-            return;
-        }
-
-        // ==================================
-        // FILTRAR INTERAÇÕES
-        // ==================================
+    if (
+        guild &&
+        typeof guild === "object"
+    ) {
+        const id =
+            guild.id ??
+            guild.guildId ??
+            guild.guild_id;
 
         if (
-            msg.op !== "dispatch" ||
-            msg.t !== "INTERACTION_CREATE" ||
-            !msg.d
+            id !== undefined &&
+            id !== null
         ) {
-            return;
+            return String(id);
         }
+    }
 
-        const interaction = msg.d;
+    return null;
+}
 
-        // ==================================
-        // IDENTIFICAR USUÁRIO
-        // ==================================
+// ==========================================
+// SNAPSHOT DE SERVIDORES
+// ==========================================
 
-        const actorId = userId(interaction);
+function processarReadyGuilds(msg) {
+    const data = msg.d ?? msg;
 
-        if (interaction.user?.id) {
-            savePlayerName(
-                interaction.user
-            );
-        }
+    const guilds =
+        data.guilds ??
+        msg.guilds;
 
-        // ==================================
-        // PROTEÇÃO DO DESENVOLVEDOR
-        // ==================================
+    if (!Array.isArray(guilds)) {
+        return;
+    }
 
-        if (
-            !isOwner(actorId) &&
-            (
-                maintenance() ||
-                blocked(actorId)
-            )
-        ) {
-            const reason = maintenance()
-                ? "🛠️ Helena está em manutenção."
-                : "🚫 Seu acesso à Helena foi bloqueado.";
+    const ids = guilds
+        .map(obterGuildId)
+        .filter(Boolean);
 
-            await responderInteracao(
-                interaction,
-                mensagemErro(reason)
-            );
+    guildIds.clear();
 
-            return;
-        }
+    for (const id of ids) {
+        guildIds.add(id);
+    }
 
-        // ==================================
-        // LOG DA INTERAÇÃO
-        // ==================================
+    guildCountComplete =
+        data.guildsComplete === true ||
+        data.guilds_complete === true ||
+        data.guildSnapshotComplete === true ||
+        msg.guildsComplete === true;
 
-        console.dir(
-            {
-                ...interaction,
-                token: "[OCULTO]"
-            },
-            {
-                depth: 6,
-                colors: true
-            }
+    console.log(
+        `[GUILDS] ${guildIds.size} servidores recebidos no READY.` +
+        (
+            guildCountComplete
+                ? " Snapshot completo."
+                : " Completude não confirmada."
+        )
+    );
+}
+
+// ==========================================
+// EVENTOS DE SERVIDORES
+// ==========================================
+
+function processarEventoGuild(msg) {
+    if (msg.op !== "dispatch") {
+        return false;
+    }
+
+    const eventName = String(
+        msg.t || ""
+    ).toUpperCase();
+
+    if (
+        eventName !== "GUILD_CREATE" &&
+        eventName !== "GUILD_DELETE"
+    ) {
+        return false;
+    }
+
+    // Diagnóstico temporário.
+
+    console.log(
+        "[DEBUG GUILD EVENT]",
+        JSON.stringify(msg, null, 2)
+    );
+
+    const guildId =
+        obterGuildId(msg.d) ||
+        obterGuildId(msg.d?.guild);
+
+    if (!guildId) {
+        console.warn(
+            `[GUILDS] ${eventName} sem ID reconhecido.`
         );
 
-        // ==================================
-        // COMPONENTES INTERATIVOS
-        // ==================================
+        return true;
+    }
 
-        if (interaction.type === "component") {
-            let resultado;
+    if (eventName === "GUILD_CREATE") {
+        guildIds.add(guildId);
+    }
 
-            try {
-                resultado = await executarComponente(
-                    interaction
-                );
-            } catch (erro) {
-                console.error(
-                    "[ERRO COMPONENTE]",
-                    erro
-                );
+    if (eventName === "GUILD_DELETE") {
+        guildIds.delete(guildId);
+    }
 
-                resultado = mensagemErro(
-                    "❌ Não foi possível processar esta interação."
-                );
-            }
+    console.log(
+        `[GUILDS] ${eventName}: ${guildIds.size} servidores conhecidos.`
+    );
 
-            await responderInteracao(
-                interaction,
-                resultado
-            );
+    return true;
+}
 
-            return;
-        }
+// ==========================================
+// OBTER STATUS COM DADOS REAIS
+// ==========================================
 
-        // ==================================
-        // FILTRAR COMANDOS
-        // ==================================
+function obterMensagensStatus() {
+    return getStatusMessages({
+        guildCount: guildIds.size,
 
-        if (interaction.type !== "command") {
-            return;
-        }
+        guildCountComplete
+    });
+}
 
-        // ==================================
-        // LOCALIZAR COMANDO
-        // ==================================
+// ==========================================
+// LIMPEZA DOS TIMERS
+// ==========================================
 
-        const commandName = interaction.data?.name;
+function limparHeartbeat() {
+    if (heartbeat !== null) {
+        clearInterval(heartbeat);
 
-        const comando = comandos.get(commandName);
+        heartbeat = null;
+    }
+}
 
-        if (!comando) {
-            console.warn(
-                `Comando desconhecido: ${commandName}`
-            );
+function limparReconexao() {
+    if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
 
-            await responderInteracao(
-                interaction,
-                mensagemErro(
-                    "❌ Este comando não está disponível."
+        reconnectTimer = null;
+    }
+}
+
+// ==========================================
+// ENVIO AO GATEWAY
+// ==========================================
+
+function enviarGateway(socket, payload) {
+    return new Promise((resolve, reject) => {
+        if (
+            !socket ||
+            socket.readyState !== WebSocket.OPEN
+        ) {
+            reject(
+                new Error(
+                    "Gateway não está conectado."
                 )
             );
 
             return;
         }
 
-        // ==================================
-        // TRATAMENTO ESPECIAL DO /PERFIL
-        // ==================================
+        socket.send(
+            JSON.stringify(payload),
 
-        if (commandName === "perfil") {
-            await executarPerfil(
-                interaction,
-                comando
-            );
+            error => {
+                if (error) {
+                    reject(error);
+                    return;
+                }
 
+                resolve();
+            }
+        );
+    });
+}
+
+// ==========================================
+// SISTEMA DE PRESENÇA — VSYNC
+// ==========================================
+
+async function atualizarPresenca(message) {
+    if (
+        typeof message !== "string" ||
+        !message.trim() ||
+        Array.from(message).length > 64
+    ) {
+        throw new Error(
+            "A atividade precisa conter entre 1 e 64 caracteres."
+        );
+    }
+
+    const socket = ws;
+
+    if (
+        !socket ||
+        socket.readyState !== WebSocket.OPEN
+    ) {
+        throw new Error(
+            "Gateway não está conectado."
+        );
+    }
+
+    await enviarGateway(
+        socket,
+        {
+            op: "update_presence",
+
+            activity: {
+                name: message
+            }
+        }
+    );
+}
+
+// ==========================================
+// RECONEXÃO AUTOMÁTICA
+// ==========================================
+
+function agendarReconexao() {
+    if (
+        shuttingDown ||
+        reconnectTimer !== null
+    ) {
+        return;
+    }
+
+    const baseDelay = Math.min(
+        30_000,
+
+        1_000 * (
+            2 ** Math.min(reconnectAttempts, 5)
+        )
+    );
+
+    const jitterFactor =
+        0.8 + Math.random() * 0.4;
+
+    const delay = Math.min(
+        30_000,
+
+        Math.round(
+            baseDelay * jitterFactor
+        )
+    );
+
+    reconnectAttempts++;
+
+    console.log(
+        `[GATEWAY] Reconectando em ${(delay / 1000).toFixed(1)}s...`
+    );
+
+    reconnectTimer = setTimeout(
+        () => {
+            reconnectTimer = null;
+
+            conectarGateway();
+        },
+        delay
+    );
+}
+
+// ==========================================
+// CONECTAR AO GATEWAY
+// ==========================================
+
+function conectarGateway() {
+    if (shuttingDown) {
+        return;
+    }
+
+    limparReconexao();
+    limparHeartbeat();
+    stopStatusRotation();
+
+    guildIds.clear();
+    guildCountComplete = false;
+
+    console.log(
+        "[GATEWAY] Iniciando conexão..."
+    );
+
+    const socket = new WebSocket(GATEWAY);
+
+    ws = socket;
+
+    // ======================================
+    // RECEBER EVENTOS DO GATEWAY
+    // ======================================
+
+    socket.on("message", async raw => {
+        if (
+            shuttingDown ||
+            socket !== ws
+        ) {
             return;
         }
 
-        // ==================================
-        // EXECUTAR DEMAIS COMANDOS
-        // ==================================
-
-        let resultado;
-
         try {
-            resultado = await comando.execute(
-                interaction
+            const msg = JSON.parse(
+                raw.toString()
+            );
+
+            // ==================================
+            // HELLO
+            // ==================================
+
+            if (msg.op === "hello") {
+                await enviarGateway(
+                    socket,
+                    {
+                        op: "identify",
+                        token: TOKEN
+                    }
+                );
+
+                limparHeartbeat();
+
+                const heartbeatMs = Number(
+                    msg.heartbeatMs
+                );
+
+                if (
+                    !Number.isFinite(heartbeatMs) ||
+                    heartbeatMs <= 0
+                ) {
+                    throw new Error(
+                        "Intervalo de heartbeat inválido."
+                    );
+                }
+
+                heartbeat = setInterval(
+                    () => {
+                        if (
+                            socket !== ws ||
+                            socket.readyState !== WebSocket.OPEN
+                        ) {
+                            return;
+                        }
+
+                        void enviarGateway(
+                            socket,
+                            {
+                                op: "ping"
+                            }
+                        ).catch(error => {
+                            console.error(
+                                "[HEARTBEAT]",
+                                error
+                            );
+                        });
+
+                    },
+                    heartbeatMs
+                );
+
+                return;
+            }
+
+            // ==================================
+            // READY
+            // ==================================
+
+            if (msg.op === "ready") {
+                reconnectAttempts = 0;
+
+                limparReconexao();
+
+                const readyData = msg.d ?? msg;
+
+                console.log(
+                    `Online como ${
+                        readyData.user?.displayName ||
+                        readyData.user?.username ||
+                        "Helena"
+                    }`
+                );
+
+                console.log(
+                    `Comandos carregados: ${comandos.size}`
+                );
+
+                processarReadyGuilds(msg);
+
+                startStatusRotation(
+                    atualizarPresenca,
+                    obterMensagensStatus
+                );
+
+                console.log(
+                    "[STATUS] Rotação com dados reais iniciada."
+                );
+
+                console.log(
+                    "[PREFIXO] Aguardando comandos iniciados com h."
+                );
+
+                return;
+            }
+
+            // ==================================
+            // EVENTOS DE SERVIDORES
+            // ==================================
+
+            if (processarEventoGuild(msg)) {
+                return;
+            }
+
+            // ==================================
+            // COMANDOS COM PREFIXO H
+            // ==================================
+
+            // Recebe mensagens comuns do canal.
+            //
+            // Exemplos:
+            // hajuda
+            // hperfil
+            // hdaily
+            // hajuda economia
+            //
+            // Não utiliza callback de interação.
+            // A resposta é publicada diretamente
+            // no canal através da API REST.
+
+            if (
+                msg.op === "dispatch" &&
+                msg.t === "MESSAGE_CREATE" &&
+                msg.d
+            ) {
+                try {
+                    await processarPrefixo({
+                        message: msg.d,
+
+                        comandos,
+
+                        send: enviarMensagemCanal
+                    });
+
+                } catch (erro) {
+                    console.error(
+                        "[ERRO PREFIXO]",
+                        erro
+                    );
+                }
+
+                return;
+            }
+
+            // ==================================
+            // FILTRAR INTERAÇÕES SLASH
+            // ==================================
+
+            if (
+                msg.op !== "dispatch" ||
+                msg.t !== "INTERACTION_CREATE" ||
+                !msg.d
+            ) {
+                return;
+            }
+
+            const interaction = msg.d;
+
+            // ==================================
+            // IDENTIFICAR USUÁRIO
+            // ==================================
+
+            const actorId = userId(interaction);
+
+            if (interaction.user?.id) {
+                savePlayerName(
+                    interaction.user
+                );
+            }
+
+            // ==================================
+            // PROTEÇÃO DO DESENVOLVEDOR
+            // ==================================
+
+            if (
+                !isOwner(actorId) &&
+                (
+                    maintenance() ||
+                    blocked(actorId)
+                )
+            ) {
+                const reason = maintenance()
+                    ? "🛠️ Helena está em manutenção."
+                    : "🚫 Seu acesso à Helena foi bloqueado.";
+
+                await responderInteracao(
+                    interaction,
+                    mensagemErro(reason)
+                );
+
+                return;
+            }
+
+            // ==================================
+            // LOG DA INTERAÇÃO
+            // ==================================
+
+            console.dir(
+                {
+                    ...interaction,
+                    token: "[OCULTO]"
+                },
+                {
+                    depth: 6,
+                    colors: true
+                }
+            );
+
+            // ==================================
+            // COMPONENTES INTERATIVOS
+            // ==================================
+
+            if (
+                interaction.type === "component"
+            ) {
+                let resultado;
+
+                try {
+                    resultado =
+                        await executarComponente(
+                            interaction
+                        );
+
+                } catch (erro) {
+                    console.error(
+                        "[ERRO COMPONENTE]",
+                        erro
+                    );
+
+                    resultado = mensagemErro(
+                        "❌ Não foi possível processar esta interação."
+                    );
+                }
+
+                await responderInteracao(
+                    interaction,
+                    resultado
+                );
+
+                return;
+            }
+
+            // ==================================
+            // FILTRAR COMANDOS
+            // ==================================
+
+            if (
+                interaction.type !== "command"
+            ) {
+                return;
+            }
+
+            // ==================================
+            // LOCALIZAR COMANDO
+            // ==================================
+
+            const commandName =
+                interaction.data?.name;
+
+            const comando =
+                comandos.get(commandName);
+
+            if (!comando) {
+                console.warn(
+                    `Comando desconhecido: ${commandName}`
+                );
+
+                await responderInteracao(
+                    interaction,
+
+                    mensagemErro(
+                        "❌ Este comando não está disponível."
+                    )
+                );
+
+                return;
+            }
+
+            // ==================================
+            // TRATAMENTO ESPECIAL DO /PERFIL
+            // ==================================
+
+            if (commandName === "perfil") {
+                await executarPerfil(
+                    interaction,
+                    comando
+                );
+
+                return;
+            }
+
+            // ==================================
+            // EXECUTAR DEMAIS COMANDOS
+            // ==================================
+
+            let resultado;
+
+            try {
+                resultado =
+                    await comando.execute(
+                        interaction
+                    );
+
+            } catch (erro) {
+                console.error(
+                    `Erro no comando /${comando.name}:`,
+                    erro
+                );
+
+                resultado = {
+                    type: "message",
+
+                    data: {
+                        body:
+                            "❌ Ocorreu um erro ao executar o comando."
+                    }
+                };
+            }
+
+            // ==================================
+            // VALIDAR RESPOSTA
+            // ==================================
+
+            if (!resultado) {
+                console.error(
+                    `[COMANDO SEM RESPOSTA] /${comando.name}`
+                );
+
+                resultado = mensagemErro(
+                    "❌ O comando não retornou uma resposta válida."
+                );
+            }
+
+            // ==================================
+            // RESPONDER À INTERAÇÃO
+            // ==================================
+
+            console.dir(
+                {
+                    comando: comando.name,
+                    resposta: resultado
+                },
+                {
+                    depth: 6,
+                    colors: true
+                }
+            );
+
+            await responderInteracao(
+                interaction,
+                resultado
             );
 
         } catch (erro) {
             console.error(
-                `Erro no comando /${comando.name}:`,
+                "[ERRO NO GATEWAY]",
                 erro
             );
-
-            resultado = {
-                type: "message",
-
-                data: {
-                    body:
-                        "❌ Ocorreu um erro ao executar o comando."
-                }
-            };
         }
+    });
 
-        // ==================================
-        // RESPONDER À INTERAÇÃO
-        // ==================================
+    // ======================================
+    // DESCONEXÃO
+    // ======================================
 
-        if (!resultado) {
-            console.error(
-                `[COMANDO SEM RESPOSTA] /${comando.name}`
-            );
-
-            resultado = mensagemErro(
-                "❌ O comando não retornou uma resposta válida."
-            );
-        }
-        console.dir(
-            {
-                comando: comando.name,
-                resposta: resultado
-            },
-            {
-                depth: 6,
-                colors: true
+    socket.on(
+        "close",
+        (code, reason) => {
+            if (socket !== ws) {
+                return;
             }
-        );
 
-        await responderInteracao(
-            interaction,
-            resultado
-        );
+            limparHeartbeat();
+            stopStatusRotation();
 
-    } catch (erro) {
+            ws = null;
+
+            guildIds.clear();
+            guildCountComplete = false;
+
+            console.warn(
+                "[GATEWAY] Desconectado.",
+                {
+                    code,
+
+                    reason:
+                        reason.toString() ||
+                        "Sem motivo informado"
+                }
+            );
+
+            if (!shuttingDown) {
+                agendarReconexao();
+            }
+        }
+    );
+
+    // ======================================
+    // ERROS DO WEBSOCKET
+    // ======================================
+
+    socket.on("error", error => {
         console.error(
-            "[ERRO NO GATEWAY]",
-            erro
+            "[WEBSOCKET]",
+            error
         );
+    });
+}
+
+// ==========================================
+// ENCERRAMENTO CONTROLADO
+// ==========================================
+
+function encerrar(signal) {
+    if (shuttingDown) {
+        return;
     }
-});
 
-// ==========================================
-// DESCONEXÃO
-// ==========================================
-
-ws.on("close", () => {
-    clearInterval(heartbeat);
-
-    heartbeat = null;
+    shuttingDown = true;
 
     console.log(
-        "Gateway desconectado."
+        `[SISTEMA] Recebido ${signal}. Encerrando Helena...`
     );
-});
+
+    limparHeartbeat();
+    limparReconexao();
+    stopStatusRotation();
+
+    const socket = ws;
+
+    ws = null;
+
+    if (socket) {
+        try {
+            socket.terminate();
+
+        } catch (erro) {
+            console.error(
+                "[GATEWAY] Erro ao encerrar conexão:",
+                erro
+            );
+        }
+    }
+
+    process.exitCode = 0;
+}
+
+process.once(
+    "SIGINT",
+    () => encerrar("SIGINT")
+);
+
+process.once(
+    "SIGTERM",
+    () => encerrar("SIGTERM")
+);
 
 // ==========================================
-// ERROS DO WEBSOCKET
+// INICIAR HELENA
 // ==========================================
 
-ws.on("error", (erro) => {
-    console.error(
-        "[WEBSOCKET]",
-        erro
-    );
-});
+conectarGateway();
