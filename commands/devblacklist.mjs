@@ -1,4 +1,171 @@
-import { devReply,deny,guard } from '../utils/developer-response.mjs';
-import { option,userId,logDev } from '../services/developer.mjs';
-import { setBlocked,unblock,isOwner } from '../services/developer.mjs';
-export default {name:'devblacklist',description:'Bloqueia ou libera um usuário',options:[{name:'acao',description:'Bloquear ou liberar',type:'string',required:true,choices:[{name:'Bloquear',value:'block'},{name:'Liberar',value:'unblock'}]},{name:'usuario',description:'ID do usuário',type:'string',required:true},{name:'motivo',description:'Motivo do bloqueio',type:'string',required:false}],async execute(i){if(!guard(i))return deny();try{const id=String(option(i,'usuario')??'');const action=option(i,'acao');if(!/^\d+$/.test(id))throw Error('Informe o ID numérico do usuário.');if(isOwner(id))throw Error('Não é permitido bloquear um proprietário.');if(action==='block')setBlocked(id,String(option(i,'motivo')??'Sem motivo').slice(0,300));else if(action==='unblock')unblock(id);else throw Error('Ação inválida.');logDev(userId(i),'blacklist',`${action}: ${id}`);return devReply('🚫 Blacklist',`${id}: ${action==='block'?'bloqueado':'liberado'}.`);}catch(e){return devReply("❌ Falha",e.message,"#EF4444");}}};
+
+import {
+    devReply,
+    deny,
+    guard
+} from "../utils/developer-response.mjs";
+
+import {
+    option,
+    userId,
+    logDev,
+    setBlocked,
+    unblock,
+    isOwner,
+    blocked
+} from "../services/developer.mjs";
+
+const ACTIONS = {
+    BLOCK: "block",
+    UNBLOCK: "unblock"
+};
+
+export default {
+    name: "devblacklist",
+
+    description: "Bloqueia ou libera um usuário",
+
+    options: [
+        {
+            name: "acao",
+            description: "Bloquear ou liberar",
+            type: "string",
+            required: true,
+            choices: [
+                {
+                    name: "Bloquear",
+                    value: ACTIONS.BLOCK
+                },
+                {
+                    name: "Liberar",
+                    value: ACTIONS.UNBLOCK
+                }
+            ]
+        },
+        {
+            name: "usuario",
+            description: "ID do usuário",
+            type: "string",
+            required: true
+        },
+        {
+            name: "motivo",
+            description: "Motivo do bloqueio",
+            type: "string",
+            required: false
+        }
+    ],
+
+    async execute(interaction) {
+        // Apenas desenvolvedores autorizados.
+        if (!guard(interaction)) {
+            return deny();
+        }
+
+        try {
+            const actorId = userId(interaction);
+
+            const targetId = String(
+                option(interaction, "usuario") ?? ""
+            ).trim();
+
+            const action = option(
+                interaction,
+                "acao"
+            );
+
+            const reason = String(
+                option(interaction, "motivo") ??
+                "Sem motivo informado"
+            ).trim().slice(0, 300) || "Sem motivo informado";
+
+            // ==================================
+            // VALIDAÇÕES
+            // ==================================
+
+            if (!targetId || !/^\d+$/.test(targetId)) {
+                throw new Error(
+                    "Informe um ID numérico válido."
+                );
+            }
+
+            if (
+                action !== ACTIONS.BLOCK &&
+                action !== ACTIONS.UNBLOCK
+            ) {
+                throw new Error(
+                    "Ação inválida. Utilize block ou unblock."
+                );
+            }
+
+            if (isOwner(targetId)) {
+                throw new Error(
+                    "Não é permitido bloquear ou alterar a blacklist de um proprietário."
+                );
+            }
+
+            // ==================================
+            // BLOQUEAR
+            // ==================================
+
+            if (action === ACTIONS.BLOCK) {
+                if (blocked(targetId)) {
+                    return devReply(
+                        "⚠️ Blacklist",
+                        `O usuário ${targetId} já está bloqueado.`
+                    );
+                }
+
+                setBlocked(targetId, reason);
+
+                logDev(
+                    actorId,
+                    "blacklist",
+                    `block: ${targetId} | Motivo: ${reason}`
+                );
+
+                return devReply(
+                    "🚫 Blacklist",
+                    `Usuário ${targetId} bloqueado com sucesso.\n\n**Motivo:** ${reason}`
+                );
+            }
+
+            // ==================================
+            // DESBLOQUEAR
+            // ==================================
+
+            if (!blocked(targetId)) {
+                return devReply(
+                    "⚠️ Blacklist",
+                    `O usuário ${targetId} não está bloqueado.`
+                );
+            }
+
+            unblock(targetId);
+
+            logDev(
+                actorId,
+                "blacklist",
+                `unblock: ${targetId}`
+            );
+
+            return devReply(
+                "✅ Blacklist",
+                `Usuário ${targetId} liberado com sucesso.`
+            );
+
+        } catch (error) {
+            console.error(
+                "[DEV BLACKLIST]",
+                error
+            );
+
+            return devReply(
+                "❌ Falha",
+                error.message ||
+                "Não foi possível executar esta operação.",
+                "#EF4444"
+            );
+        }
+    }
+};
