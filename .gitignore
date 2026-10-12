@@ -1,0 +1,25 @@
+# Dependências
+node_modules/
+
+# Credenciais e variáveis privadas
+.env
+.env.*
+!.env.example
+
+# Bancos SQLite e arquivos auxiliares
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Logs
+*.log
+logs/
+
+# Sistema
+.DS_Store

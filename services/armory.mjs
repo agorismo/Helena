@@ -1,0 +1,8 @@
+import { db } from "../database/connection.mjs";
+import { ensure,tx,status } from "./combat.mjs";
+import { getEquippedWeapon } from "./equipment.mjs";
+import { getPlayer } from "../database/economy.mjs";
+export function buyAmmo(g,u,q){q=Number(q);if(!Number.isSafeInteger(q)||q<1||q>100)throw Error("Quantidade entre 1 e 100.");return tx(()=>{ensure(g,u);getPlayer(g,u);const cost=q*100;const r=db.prepare("UPDATE players SET wallet=wallet-? WHERE guild_id=? AND user_id=? AND wallet>=?").run(cost,g,u,cost);if(!r.changes)throw Error("Carteira insuficiente.");db.prepare("UPDATE combat_gear SET ammo=ammo+? WHERE guild_id=? AND user_id=?").run(q,g,u);return cost;});}
+export function buyVest(g,u){return tx(()=>{ensure(g,u);getPlayer(g,u);const cost=10000;const r=db.prepare("UPDATE players SET wallet=wallet-? WHERE guild_id=? AND user_id=? AND wallet>=?").run(cost,g,u,cost);if(!r.changes)throw Error("Carteira insuficiente.");db.prepare("UPDATE combat_gear SET vest=10 WHERE guild_id=? AND user_id=?").run(g,u);return cost;});}
+export function repair(g,u){return tx(()=>{ensure(g,u);getPlayer(g,u);if(!getEquippedWeapon(g,u))throw Error("Equipe uma arma primeiro.");const cost=5000;const r=db.prepare("UPDATE players SET wallet=wallet-? WHERE guild_id=? AND user_id=? AND wallet>=?").run(cost,g,u,cost);if(!r.changes)throw Error("Carteira insuficiente.");db.prepare("UPDATE combat_gear SET durability=100 WHERE guild_id=? AND user_id=?").run(g,u);return cost;});}
+export function reload(g,u){const weapon=getEquippedWeapon(g,u);if(!weapon||weapon.weaponType!=="firearm")throw Error("Equipe uma arma de fogo.");const s=status(g,u);return s.ammo;}
